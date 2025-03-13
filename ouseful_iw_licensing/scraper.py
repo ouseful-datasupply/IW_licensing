@@ -3,19 +3,72 @@ from bs4 import BeautifulSoup
 import time
 import urllib.parse
 import random
+from datetime import datetime, date
+import calendar
+import pandas as pd
+import sys
 
-class IWlicensingAPI():
+class IWlicensingAPI:
     BASE_URL = "https://publicaccess.iow.gov.uk"
 
-    def __init__(
-        self
-    ):
+    def __init__(self):
         # Create a session object - this automatically stores cookies
         self.session = requests.Session()
         self.last_request_time = 0
 
         self.jsession_id = None
         self.csrf_token = None
+
+    def get_month_dates(self, month_num, year, formatted=True):
+        first_day = date(year, month_num, 1)
+        last_day = date(year, month_num, calendar.monthrange(year, month_num)[1])
+        if formatted:
+            return self.format_date_to_string(first_day), self.format_date_to_string(
+                last_day
+            )
+
+        return first_day, last_day
+
+    # Via claude.ai
+    def format_date_to_string(self, date_input):
+        """
+        Convert various date formats to a string in the format "DD/MM/YYYY".
+
+        Args:
+            date_input: Can be a datetime object, date object, string, timestamp, or pandas Timestamp
+
+        Returns:
+            String in format "DD/MM/YYYY"
+        """
+        if not date_input:
+            return ""
+
+        # Handle different input types
+        if isinstance(date_input, (datetime, date)):
+            # Already a datetime or date object
+            return date_input.strftime("%d/%m/%Y")
+
+        elif isinstance(date_input, str):
+            try:
+                # Try to parse the string as a date
+                parsed_date = pd.to_datetime(date_input, dayfirst=True)
+                return parsed_date.strftime("%d/%m/%Y")
+            except:
+                pass
+                # raise ValueError(f"Could not parse date string: {date_input}")
+
+        elif isinstance(date_input, pd.Timestamp):
+            # Pandas Timestamp object
+            return date_input.strftime("%d/%m/%Y")
+
+        else:
+            try:
+                # Try to convert other types (like timestamps)
+                parsed_date = pd.to_datetime(date_input, dayfirst=True)
+                return parsed_date.strftime("%d/%m/%Y")
+            except:
+                pass
+                # raise ValueError(f"Unsupported date format or type: {type(date_input)}")
 
     def get_csrf_credentials(self, typ="LicencingApplication"):
         # LicencingApplication or Licencing
@@ -42,10 +95,18 @@ class IWlicensingAPI():
 
         return self.jsession_id, self.csrf_token
 
-    def make_request(self, params=None, jsession_id=None, csrf_token=None, url=None, attempts=2, minwait=0.1):
+    def make_request(
+        self,
+        params=None,
+        jsession_id=None,
+        csrf_token=None,
+        url=None,
+        attempts=2,
+        minwait=0.1,
+    ):
         # typ: LicencingApplication or Licencing
         if not jsession_id or not csrf_token:
-            if not self.jsession_id or not self.csrf_token :
+            if not self.jsession_id or not self.csrf_token:
                 jsession_id, csrf_token = self.get_csrf_credentials()
             else:
                 jsession_id, csrf_token = self.jsession_id, self.csrf_token
@@ -70,22 +131,26 @@ class IWlicensingAPI():
         cookies = {"JSESSIONID": jsession_id}
 
         # if not params, return an example?
-        if not params or not (set(params.keys()) - {"searchType"}):
+        use_params = params and (set(params.keys()) - {"searchType"})
+        if not use_params:
             data = f"_csrf={csrf_token}&date%28receivedStart%29=13%2F02%2F2024&date%28receivedEnd%29=13%2F04%2F2024&searchType=Licencing"
+            # print(f"QUERY: using example params; params sent were {params}")
         else:
             encoded_params = urllib.parse.urlencode(params)
             data = f"_csrf={csrf_token}&{encoded_params}"
+            # print(f"QUERY: using data args: {data}; params sent were {params}")
             # For now, I am going to add parameter support
             # for things I want to use in scraping.
             # The scraper will work daily,
             # but to bootstrap the database, we might want to scrape
             # a month at a time, for example.
 
+        # print(f"URL is {url}; data is {data}")
         # Be nice
         current_time = time.time()
         elapsed_time = current_time - self.last_request_time
         # THis could be expeirmented with...
-        wait = random.uniform(minwait, minwait+0.5)
+        wait = random.uniform(minwait, minwait + 0.5)
         if elapsed_time < wait:
             wait_time = wait - elapsed_time
             # print(f"Waiting {wait_time:.4f} seconds to respect rate limit...")
@@ -95,9 +160,10 @@ class IWlicensingAPI():
         # Update last request time
         self.last_request_time = time.time()
 
-        if response.status_code!=200:
+        if response.status_code != 200 and attempts>0:
             print("Trying again")
-            self.make_request(url=url)
+            attempts = attempts - 1
+            self.make_request(url=url, params=params, attempts = attempts)
 
         print(response.status_code)
 
@@ -118,7 +184,7 @@ class IWlicensingAPI():
 
         # Find the target table
         if table_id:
-            table = soup.find('table', id=table_id)
+            table = soup.find("table", id=table_id)
         elif table_class:
             table = soup.find("table", class_=table_class)
         else:
@@ -191,7 +257,7 @@ class IWlicensingAPI():
 
         for row in table.find_all("tr"):
             key = row.find("th").get_text(strip=True)
-            value = row.find("td").get_text(strip=True).strip("|")
+            value = row.find("td").get_text(strip=True).strip("\n\r |")
             data[key] = value
 
         return data
@@ -228,11 +294,19 @@ class IWlicensingAPI():
             applicant_name = "N/A"
 
             if "Ref. No:" in meta_info and "Status:" in meta_info:
-                ref_no = meta_info.split("Ref. No:")[1].split("Status:")[0].strip()
+                ref_no = (
+                    meta_info.split("Ref. No:")[1].split("Status:")[0].strip("\n\r |")
+                )
             if "Status:" in meta_info and "Applicant Name:" in meta_info:
-                status = meta_info.split("Status:")[1].split("Applicant Name:")[0].strip()
+                status = (
+                    meta_info.split("Status:")[1]
+                    .split("Applicant Name:")[0]
+                    .strip("\n\r |")
+                )
             if "Applicant Name:" in meta_info:
-                applicant_name = meta_info.split("Applicant Name:")[1].strip()
+                applicant_name = (
+                    meta_info.split("Applicant Name:")[1].strip("\n\r |")
+                )
 
             applications.append(
                 {
@@ -251,40 +325,66 @@ class IWlicensingAPI():
         if next_page_anchor:
             next_page_link = next_page_anchor[0]["href"]
 
-        for app in applications:
-            print(app)
+        # for app in applications:
+        #    print(app)
 
         if next_page_link:
             print("Next page URL:", next_page_link)
 
         return applications, next_page_link
 
-    def parse_response(self, response, firstpageonly=True, getSummary=False):
+    def parse_response(self, response, params=None, firstpageonly=True, getSummary=False):
         applications, next_page_link = self._parse_response(response)
         if not firstpageonly:
             while next_page_link:
                 print("Getting next page...")
-                response = self.make_request(url=next_page_link)
+                response = self.make_request(url=next_page_link, params=params)
                 _applications, next_page_link = self._parse_response(response)
                 applications.extend(_applications)
 
         if getSummary:
+            print(f"Getting summary data {len(applications)} records to collect...")
             for app in applications:
-                link=app.get("link", "")
+                link = app.get("link", "")
                 if link:
                     response = self.session.get(f"{self.BASE_URL}{link}")
                     record = self._parse_summary_record(response.text)
                     # Add these items to the application dict
                     app.update({f"summary.{k}": v for k, v in record.items()})
                     # Are there any notice details?
-                    record = self.parse_messy_table(response.text, table_class="noticeDetails")
+                    record = self.parse_messy_table(
+                        response.text, table_class="noticeDetails"
+                    )
                     app.update({f"notice.{k}": v for k, v in record.items()})
                     # Are there any notice details?
 
         return applications
 
+    def licensing_params_from_date_startend(self, start="", end="", typ="Licencing"):
+        # LicencingApplication or Licencing
+
+        if typ.lower() == "Licencing".lower():
+
+            params = {
+                "date(issuedStart)": self.format_date_to_string(start),
+                "date(issuedEnd)": self.format_date_to_string(end),
+                "searchType": "Licencing",
+            }
+
+        else:
+            params = {
+                "date(receivedStart)": self.format_date_to_string(start),
+                "date(receivedEnd)": self.format_date_to_string(end),
+                "searchType": "LicencingApplication",
+            }
+        return params
+
     def scrape_licenses(
-        self, params=None, typ="LicencingApplication", firstpageonly=True, getSmmary=True
+        self,
+        params=None,
+        typ="LicencingApplication",
+        firstpageonly=True,
+        getSummary=False,
     ):
         # The firstpageonly setting is a defence
 
@@ -296,7 +396,9 @@ class IWlicensingAPI():
 
         # typ: LicencingApplication or Licencing
         self.get_csrf_credentials(typ)
-        response = self.make_request()
-        applications = self.parse_response(response, firstpageonly=firstpageonly, getSummary=getSmmary)
+        response = self.make_request(params)
+        applications = self.parse_response(
+            response, params, firstpageonly=firstpageonly, getSummary=getSummary
+        )
 
         return applications
